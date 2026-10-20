@@ -84,22 +84,3 @@ void freeList(Seqlist* L)
     free(L);
 }
 
-int main()
-{
-    Seqlist* L = initList();
-    printList(L);
-    int i = 1;
-    for(; i <= 3;i++)
-    {
-        tailInsert(L,i);
-    }
-    printList(L);
-    getdata(L,3);
-    numDelete(L,2);
-    printList(L);
-    tailDelete(L);
-    printList(L);
-    freeList(L);
-
-    return 0;
-}
