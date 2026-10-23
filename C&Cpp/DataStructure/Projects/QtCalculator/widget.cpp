@@ -3,139 +3,168 @@
 
 #include <QLabel>
 #include <QPushButton>
+#include <QStack>
+#include <QVector>
 
 #include <cmath>
 
 namespace {
 
-// 递归下降解析器：expression -> term -> unary -> primary。
-// 这样天然满足 *、/ 高于 +、-，且括号可递归嵌套。
-class ExpressionParser
+enum class TokenType { Number, Operator, Function, LeftParenthesis, RightParenthesis };
+
+struct Token
 {
-public:
-    explicit ExpressionParser(const QString &input) : input_(input) {}
-
-    bool parse(double *result)
-    {
-        skipSpaces();
-        if (atEnd())
-            return fail(QStringLiteral("请输入表达式"));
-
-        double value = 0.0;
-        if (!parseExpression(&value))
-            return false;
-        skipSpaces();
-        if (!atEnd())
-            return fail(QStringLiteral("第 %1 个字符附近有错误").arg(pos_ + 1));
-        if (!std::isfinite(value))
-            return fail(QStringLiteral("计算结果超出范围"));
-
-        *result = value;
-        return true;
-    }
-
-    QString error() const { return error_; }
-
-private:
-    const QString &input_;
-    int pos_ = 0;
-    QString error_;
-
-    bool atEnd() const { return pos_ >= input_.size(); }
-    QChar peek() const { return atEnd() ? QChar() : input_.at(pos_); }
-    void skipSpaces() { while (!atEnd() && peek().isSpace()) ++pos_; }
-    bool fail(const QString &message) { error_ = message; return false; }
-
-    bool parseExpression(double *value)
-    {
-        if (!parseTerm(value)) return false;
-        while (true) {
-            skipSpaces();
-            const QChar op = peek();
-            if (op != '+' && op != '-') break;
-            ++pos_;
-            double right = 0.0;
-            if (!parseTerm(&right)) return fail(QStringLiteral("运算符后缺少数字或括号"));
-            *value = op == '+' ? *value + right : *value - right;
-            if (!std::isfinite(*value)) return fail(QStringLiteral("计算结果超出范围"));
-        }
-        return true;
-    }
-
-    bool parseTerm(double *value)
-    {
-        if (!parseUnary(value)) return false;
-        while (true) {
-            skipSpaces();
-            const QChar op = peek();
-            if (op != '*' && op != '/') break;
-            ++pos_;
-            double right = 0.0;
-            if (!parseUnary(&right)) return fail(QStringLiteral("运算符后缺少数字或括号"));
-            if (op == '/') {
-                if (std::abs(right) < 1e-15) return fail(QStringLiteral("除数不能为零"));
-                *value /= right;
-            } else {
-                *value *= right;
-            }
-            if (!std::isfinite(*value)) return fail(QStringLiteral("计算结果超出范围"));
-        }
-        return true;
-    }
-
-    bool parseUnary(double *value)
-    {
-        skipSpaces();
-        if (peek() == '+') { ++pos_; return parseUnary(value); }
-        if (peek() == '-') { ++pos_; if (!parseUnary(value)) return false; *value = -*value; return true; }
-        return parsePrimary(value);
-    }
-
-    bool parsePrimary(double *value)
-    {
-        skipSpaces();
-        if (peek() == '(') {
-            ++pos_;
-            if (!parseExpression(value)) return false;
-            skipSpaces();
-            if (peek() != ')') return fail(QStringLiteral("缺少右括号 )"));
-            ++pos_;
-            return true;
-        }
-
-        // sqrt(x) 仅由“√x”按钮生成，但解析器也会校验其语法。
-        if (input_.mid(pos_, 4) == QStringLiteral("sqrt")) {
-            pos_ += 4;
-            skipSpaces();
-            if (peek() != '(') return fail(QStringLiteral("sqrt 后缺少左括号"));
-            ++pos_;
-            if (!parseExpression(value)) return false;
-            skipSpaces();
-            if (peek() != ')') return fail(QStringLiteral("sqrt 缺少右括号 )"));
-            ++pos_;
-            if (*value < 0.0) return fail(QStringLiteral("负数不能开平方"));
-            *value = std::sqrt(*value);
-            return true;
-        }
-
-        const int start = pos_;
-        bool hasDigit = false;
-        while (!atEnd() && peek().isDigit()) { hasDigit = true; ++pos_; }
-        if (!atEnd() && peek() == '.') {
-            ++pos_;
-            while (!atEnd() && peek().isDigit()) { hasDigit = true; ++pos_; }
-        }
-        if (!hasDigit) return fail(QStringLiteral("需要数字或左括号"));
-
-        bool ok = false;
-        *value = input_.mid(start, pos_ - start).toDouble(&ok);
-        return ok ? true : fail(QStringLiteral("数字格式错误"));
-    }
+    TokenType type;
+    double number = 0.0;
+    QChar symbol;
 };
 
 bool isBinaryOperator(QChar ch)
 {
     return ch == '+' || ch == '-' || ch == '*' || ch == '/';
+}
+
+// 采用调度场（Shunting-yard）算法：把中缀表达式转为逆波兰式（RPN）。
+// 一元负号用内部符号 '~' 表示，避免与二元减号混淆。
+int precedence(QChar op)
+{
+    if (op == '~') return 3;
+    if (op == '*' || op == '/') return 2;
+    return 1;
+}
+
+bool isRightAssociative(QChar op)
+{
+    return op == '~';
+}
+
+bool toReversePolishNotation(const QString &input, QVector<Token> *output, QString *error)
+{
+    QStack<Token> operators;
+    bool expectsValue = true;
+
+    for (int pos = 0; pos < input.size();) {
+        if (input.at(pos).isSpace()) { ++pos; continue; }
+
+        if (input.mid(pos, 4) == QStringLiteral("sqrt")) {
+            if (!expectsValue) { *error = QStringLiteral("第 %1 个字符附近缺少运算符").arg(pos + 1); return false; }
+            int next = pos + 4;
+            while (next < input.size() && input.at(next).isSpace()) ++next;
+            if (next >= input.size() || input.at(next) != '(') { *error = QStringLiteral("sqrt 后缺少左括号"); return false; }
+            operators.push({TokenType::Function, 0.0, QChar()});
+            pos += 4;
+            continue;
+        }
+
+        const QChar ch = input.at(pos);
+        if (ch.isDigit() || ch == '.') {
+            if (!expectsValue) { *error = QStringLiteral("第 %1 个字符附近缺少运算符").arg(pos + 1); return false; }
+            const int start = pos;
+            bool hasDigit = false;
+            while (pos < input.size() && input.at(pos).isDigit()) { hasDigit = true; ++pos; }
+            if (pos < input.size() && input.at(pos) == '.') {
+                ++pos;
+                while (pos < input.size() && input.at(pos).isDigit()) { hasDigit = true; ++pos; }
+            }
+            if (!hasDigit) { *error = QStringLiteral("数字格式错误"); return false; }
+            bool ok = false;
+            const double number = input.mid(start, pos - start).toDouble(&ok);
+            if (!ok || !std::isfinite(number)) { *error = QStringLiteral("数字格式错误"); return false; }
+            output->append({TokenType::Number, number, QChar()});
+            expectsValue = false;
+            continue;
+        }
+
+        if (ch == '(') {
+            if (!expectsValue) { *error = QStringLiteral("第 %1 个字符附近缺少运算符").arg(pos + 1); return false; }
+            operators.push({TokenType::LeftParenthesis, 0.0, ch});
+            ++pos;
+            continue;
+        }
+
+        if (ch == ')') {
+            if (expectsValue) { *error = QStringLiteral("右括号前缺少数字或表达式"); return false; }
+            while (!operators.isEmpty() && operators.top().type != TokenType::LeftParenthesis)
+                output->append(operators.pop());
+            if (operators.isEmpty()) { *error = QStringLiteral("缺少左括号 ("); return false; }
+            operators.pop();
+            if (!operators.isEmpty() && operators.top().type == TokenType::Function)
+                output->append(operators.pop());
+            ++pos;
+            expectsValue = false;
+            continue;
+        }
+
+        if (isBinaryOperator(ch)) {
+            QChar op = ch;
+            if (expectsValue) {
+                if (ch == '+') { ++pos; continue; }
+                if (ch == '-') op = '~';
+                else { *error = QStringLiteral("运算符后缺少数字或括号"); return false; }
+            }
+            while (!operators.isEmpty() && operators.top().type == TokenType::Operator) {
+                const QChar top = operators.top().symbol;
+                if (precedence(top) > precedence(op)
+                    || (precedence(top) == precedence(op) && !isRightAssociative(op)))
+                    output->append(operators.pop());
+                else
+                    break;
+            }
+            operators.push({TokenType::Operator, 0.0, op});
+            ++pos;
+            expectsValue = true;
+            continue;
+        }
+
+        *error = QStringLiteral("第 %1 个字符附近有错误").arg(pos + 1);
+        return false;
+    }
+
+    if (expectsValue) { *error = QStringLiteral("运算符后缺少数字或括号"); return false; }
+    while (!operators.isEmpty()) {
+        const Token token = operators.pop();
+        if (token.type == TokenType::LeftParenthesis) { *error = QStringLiteral("缺少右括号 )"); return false; }
+        if (token.type == TokenType::Function) { *error = QStringLiteral("sqrt 后缺少左括号"); return false; }
+        output->append(token);
+    }
+    return true;
+}
+
+bool evaluateReversePolishNotation(const QVector<Token> &tokens, double *result, QString *error)
+{
+    QStack<double> values;
+    for (const Token &token : tokens) {
+        if (token.type == TokenType::Number) {
+            values.push(token.number);
+        } else if (token.type == TokenType::Function) {
+            if (values.isEmpty()) { *error = QStringLiteral("sqrt 缺少参数"); return false; }
+            const double value = values.pop();
+            if (value < 0.0) { *error = QStringLiteral("负数不能开平方"); return false; }
+            values.push(std::sqrt(value));
+        } else if (token.type == TokenType::Operator) {
+            if (token.symbol == '~') {
+                if (values.isEmpty()) { *error = QStringLiteral("负号后缺少数字或括号"); return false; }
+                values.push(-values.pop());
+                continue;
+            }
+            if (values.size() < 2) { *error = QStringLiteral("运算符后缺少数字或括号"); return false; }
+            const double right = values.pop();
+            const double left = values.pop();
+            double value = 0.0;
+            if (token.symbol == '+') value = left + right;
+            else if (token.symbol == '-') value = left - right;
+            else if (token.symbol == '*') value = left * right;
+            else {
+                if (std::abs(right) < 1e-15) { *error = QStringLiteral("除数不能为零"); return false; }
+                value = left / right;
+            }
+            if (!std::isfinite(value)) { *error = QStringLiteral("计算结果超出范围"); return false; }
+            values.push(value);
+        }
+    }
+    if (values.size() != 1) { *error = QStringLiteral("表达式格式错误"); return false; }
+    *result = values.pop();
+    return true;
 }
 
 } // namespace
@@ -367,8 +396,8 @@ void Widget::calculate()
 
 bool Widget::evaluate(const QString &text, double *result, QString *error) const
 {
-    ExpressionParser parser(text);
-    if (parser.parse(result)) return true;
-    *error = parser.error();
-    return false;
+    QVector<Token> reversePolishNotation;
+    if (!toReversePolishNotation(text, &reversePolishNotation, error))
+        return false;
+    return evaluateReversePolishNotation(reversePolishNotation, result, error);
 }
