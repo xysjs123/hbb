@@ -5,20 +5,19 @@ using namespace std;
 int main()
 {
     vector<int> nums;
-    for(int i = 10;i <= 50;i +=10)
+
+    for(int i = 10;i <= 50;i+10)
     {
         nums.push_back(i);
     }
-    cout << "nums' quality:" << nums.size() << endl;
-    nums.pop_back();
-    cout << "nums' quality:" << nums.size() << endl;
-    cout << "last num:" << nums.back() << endl;
-    if(nums.empty())
+    auto it = nums.begin();
+    nums.insert(it + 2,25);
+    it = nums.begin();
+    nums.erase(it + 4);
+    for(int num : nums)
     {
-        cout <<"empty" << endl;
-    }else
-    {
-        cout << "Not empty" << endl;
+        cout << num << endl;
     }
+
     return 0;
 }
